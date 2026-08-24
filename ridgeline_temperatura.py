@@ -300,23 +300,21 @@ def _eixo_x_texto(metrica_label: str) -> str:
 
 
 def _gerar_paleta(n: int) -> list[str]:
-    """
-    Gradiente do azul (decadas antigas) ao vermelho (decadas recentes).
-    Usa uma escala customizada (em vez de RdYlBu_r) porque o meio de
-    RdYlBu_r passa por um amarelo quase branco, que fica invisivel contra
-    o fundo branco do grafico quando combinado com a transparencia do
-    preenchimento.
-    """
+    """Gradiente do azul (decadas antigas) ao vermelho (decadas recentes)."""
     import plotly.colors as pc
 
-    escala_sem_tons_claros = [
-        [0.0, "#2c3e91"],   # azul escuro
-        [0.25, "#4a90c4"],  # azul
-        [0.5, "#8e44ad"],   # roxo
-        [0.75, "#e0562f"],  # laranja avermelhado
-        [1.0, "#a50026"],   # vermelho escuro
-    ]
-    return pc.sample_colorscale(escala_sem_tons_claros, np.linspace(0.0, 1.0, n))
+    return pc.sample_colorscale("RdYlBu_r", np.linspace(0.05, 0.95, n))
+
+
+def _escurecer(cor_rgb: str, fator: float = 0.55) -> str:
+    """
+    Escurece uma cor "rgb(r, g, b)" multiplicando cada canal pelo fator.
+    Usado no contorno das cristas para garantir contraste mesmo quando o
+    preenchimento cai num tom claro do meio da paleta (ex.: RdYlBu_r).
+    """
+    numeros = cor_rgb[cor_rgb.index("(") + 1 : cor_rgb.index(")")].split(",")
+    r, g, b = (max(0, min(255, int(round(float(n) * fator)))) for n in numeros)
+    return f"rgb({r}, {g}, {b})"
 
 
 def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[str], str]:
@@ -373,9 +371,9 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
                         x=grade_x,
                         y=base_y + densidade,
                         mode="lines",
-                        line=dict(color=cor, width=1.5),
+                        line=dict(color=_escurecer(cor), width=2),
                         fill="tonexty",
-                        fillcolor=cor.replace("rgb", "rgba").replace(")", ", 0.88)"),
+                        fillcolor=cor,
                         name=f"{decada}s",
                         showlegend=False,
                         customdata=np.column_stack([np.full_like(grade_x, decada), densidade]),
