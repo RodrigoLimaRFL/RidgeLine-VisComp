@@ -337,7 +337,11 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
             grupo = f"{metrica_label}|{regiao_label}"
             visivel_por_padrao = grupo == grupo_padrao
 
-            for i, decada in enumerate(decadas):
+            # Desenha da decada de cima (base_y maior) para a de baixo, para
+            # que a crista de baixo seja renderizada por cima (na frente) da
+            # de cima - efeito classico de ridgeline, em que cada crista
+            # "sobe" cobrindo a base da crista acima dela.
+            for i, decada in reversed(list(enumerate(decadas))):
                 amostras = subset_regiao.loc[subset_regiao["decada"] == decada, metrica_col].dropna().to_numpy()
                 if len(amostras) < MIN_LEITURAS_POR_CELULA:
                     continue
