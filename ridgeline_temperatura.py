@@ -385,7 +385,7 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
     espacamento_y = 0.55
     amplitude_maxima = espacamento_y * 2.2
     cores = _gerar_paleta(len(decadas))
-    grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 400)
+    grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 180)
     rng = np.random.default_rng(RNG_SEED)
 
     fig = go.Figure()
@@ -468,7 +468,7 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
     espacamento_y = 0.55
     amplitude_maxima = espacamento_y * 2.2
     cores = _gerar_paleta(12)
-    grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 400)
+    grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 180)
     rng = np.random.default_rng(RNG_SEED)
 
     fig = go.Figure()
