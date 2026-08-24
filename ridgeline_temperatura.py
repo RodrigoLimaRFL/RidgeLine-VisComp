@@ -64,6 +64,11 @@ MIN_LEITURAS_POR_CELULA = 200
 # mudar a forma da curva).
 MAX_AMOSTRAS_KDE = 50_000
 
+# O grafico mensal tem muito mais combinacoes (metrica x regiao x decada x
+# mes), entao usamos um limite menor por crista para manter o tempo de
+# geracao razoavel.
+MAX_AMOSTRAS_KDE_MENSAL = 20_000
+
 OUTPUT_HTML = Path(__file__).parent / "ridgeline_temperatura_brasil.html"
 
 RNG_SEED = 42
@@ -71,6 +76,11 @@ RNG_SEED = 42
 METRICAS = [("Média", "tmed"), ("Máxima", "tmax"), ("Mínima", "tmin")]
 
 REGIOES_ORDENADAS = ["Brasil (todas)", "Norte", "Nordeste", "Centro-Oeste", "Sudeste", "Sul"]
+
+MESES = [
+    (1, "Jan"), (2, "Fev"), (3, "Mar"), (4, "Abr"), (5, "Mai"), (6, "Jun"),
+    (7, "Jul"), (8, "Ago"), (9, "Set"), (10, "Out"), (11, "Nov"), (12, "Dez"),
+]
 
 UF_PARA_REGIAO = {
     "AC": "Norte", "AP": "Norte", "AM": "Norte", "PA": "Norte",
@@ -271,6 +281,7 @@ def preparar_dados(dados: pd.DataFrame, estacoes: pd.DataFrame) -> pd.DataFrame:
         dados.loc[fora_da_faixa, coluna] = np.nan
 
     dados["ano"] = dados["data"].dt.year
+    dados["mes"] = dados["data"].dt.month
     dados["decada"] = (dados["ano"] // 10 * 10).astype(int)
     dados = dados[(dados["decada"] >= 1960) & (dados["decada"] <= 2010)]
 
@@ -317,6 +328,58 @@ def _escurecer(cor_rgb: str, fator: float = 0.55) -> str:
     return f"rgb({r}, {g}, {b})"
 
 
+def _traco_crista(
+    grade_x: np.ndarray,
+    base_y: float,
+    densidade: np.ndarray,
+    cor: str,
+    nome: str,
+    hovertemplate: str,
+    visivel: bool,
+) -> tuple[go.Scatter, go.Scatter]:
+    """
+    Constroi o par de traces de uma unica crista: uma linha de base
+    invisivel (contra a qual a segunda trace preenche com fill="tonexty")
+    e a curva de densidade em si. E o bloco basico reaproveitado tanto no
+    ridgeline por decada quanto no ridgeline mensal.
+    """
+    baseline = go.Scatter(
+        x=grade_x,
+        y=np.full_like(grade_x, base_y),
+        mode="lines",
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo="skip",
+        visible=visivel,
+    )
+    crista = go.Scatter(
+        x=grade_x,
+        y=base_y + densidade,
+        mode="lines",
+        line=dict(color=_escurecer(cor), width=2),
+        fill="tonexty",
+        fillcolor=cor,
+        name=nome,
+        showlegend=False,
+        customdata=densidade,
+        hovertemplate=hovertemplate,
+        visible=visivel,
+    )
+    return baseline, crista
+
+
+def _kde_normalizado(
+    amostras: np.ndarray, grade_x: np.ndarray, amplitude_maxima: float, limite_amostras: int, rng: np.random.Generator
+) -> np.ndarray | None:
+    if len(amostras) < MIN_LEITURAS_POR_CELULA:
+        return None
+    if len(amostras) > limite_amostras:
+        amostras = rng.choice(amostras, size=limite_amostras, replace=False)
+    kde = gaussian_kde(amostras)
+    densidade = kde(grade_x)
+    return densidade / densidade.max() * amplitude_maxima
+
+
 def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[str], str]:
     decadas = sorted(dados["decada"].unique())
     espacamento_y = 0.55
@@ -343,52 +406,26 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
             # "sobe" cobrindo a base da crista acima dela.
             for i, decada in reversed(list(enumerate(decadas))):
                 amostras = subset_regiao.loc[subset_regiao["decada"] == decada, metrica_col].dropna().to_numpy()
-                if len(amostras) < MIN_LEITURAS_POR_CELULA:
+                densidade = _kde_normalizado(amostras, grade_x, amplitude_maxima, MAX_AMOSTRAS_KDE, rng)
+                if densidade is None:
                     continue
-                if len(amostras) > MAX_AMOSTRAS_KDE:
-                    amostras = rng.choice(amostras, size=MAX_AMOSTRAS_KDE, replace=False)
 
-                kde = gaussian_kde(amostras)
-                densidade = kde(grade_x)
-                densidade = densidade / densidade.max() * amplitude_maxima
-
-                base_y = i * espacamento_y
-                cor = cores[i]
-
-                # linha de base invisivel: e contra ela que a crista seguinte
-                # (fill="tonexty") preenche, dando o efeito classico do ridgeline.
-                fig.add_trace(
-                    go.Scatter(
-                        x=grade_x,
-                        y=np.full_like(grade_x, base_y),
-                        mode="lines",
-                        line=dict(width=0),
-                        showlegend=False,
-                        hoverinfo="skip",
-                        visible=visivel_por_padrao,
-                    )
+                baseline, crista = _traco_crista(
+                    grade_x,
+                    i * espacamento_y,
+                    densidade,
+                    cores[i],
+                    nome=f"{decada}s",
+                    hovertemplate=(
+                        f"Década: {decada}s<br>"
+                        "Temperatura: %{x:.1f} °C<br>"
+                        "Densidade relativa: %{customdata:.2f}<extra></extra>"
+                    ),
+                    visivel=visivel_por_padrao,
                 )
+                fig.add_trace(baseline)
                 grupos_por_trace.append(grupo)
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=grade_x,
-                        y=base_y + densidade,
-                        mode="lines",
-                        line=dict(color=_escurecer(cor), width=2),
-                        fill="tonexty",
-                        fillcolor=cor,
-                        name=f"{decada}s",
-                        showlegend=False,
-                        customdata=np.column_stack([np.full_like(grade_x, decada), densidade]),
-                        hovertemplate=(
-                            "Década: %{customdata[0]:.0f}s<br>"
-                            "Temperatura: %{x:.1f} °C<br>"
-                            "Densidade relativa: %{customdata[1]:.2f}<extra></extra>"
-                        ),
-                        visible=visivel_por_padrao,
-                    )
-                )
+                fig.add_trace(crista)
                 grupos_por_trace.append(grupo)
 
     metrica_padrao, regiao_padrao = grupo_padrao.split("|")
@@ -412,6 +449,92 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
     return fig, grupos_por_trace, grupo_padrao
 
 
+def _titulo_texto_mensal(metrica_label: str, decada: int) -> str:
+    return (
+        f"Variação mensal da temperatura {metrica_label.lower()} — década de {decada}"
+        "<br><sup>Fonte: INMET/BDMEP - estações convencionais (1961-2019), via Kaggle</sup>"
+    )
+
+
+def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], str, list[int]]:
+    """
+    Segunda visualizacao: para uma decada e regiao escolhidas, mostra como a
+    metrica selecionada varia mes a mes (12 cristas, uma por mes).
+    """
+    decadas = sorted(dados["decada"].unique())
+    numeros_meses = [n for n, _ in MESES]
+    nomes_meses = [nome for _, nome in MESES]
+
+    espacamento_y = 0.55
+    amplitude_maxima = espacamento_y * 2.2
+    cores = _gerar_paleta(12)
+    grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 400)
+    rng = np.random.default_rng(RNG_SEED)
+
+    fig = go.Figure()
+    grupos_por_trace: list[str] = []  # a que combinacao metrica|regiao|decada cada trace pertence
+    decada_padrao = decadas[-1]
+    grupo_padrao = f"{METRICAS[0][0]}|{REGIOES_ORDENADAS[0]}|{decada_padrao}"
+
+    for metrica_label, metrica_col in METRICAS:
+        for regiao_label in REGIOES_ORDENADAS:
+            subset_regiao = (
+                dados if regiao_label == "Brasil (todas)" else dados[dados["regiao"] == regiao_label]
+            )
+            for decada in decadas:
+                subset_decada = subset_regiao[subset_regiao["decada"] == decada]
+                grupo = f"{metrica_label}|{regiao_label}|{decada}"
+                visivel_por_padrao = grupo == grupo_padrao
+
+                # mesma logica de sobreposicao do grafico por decada: mes de
+                # baixo desenhado por ultimo, para ficar na frente.
+                for i, mes_num in reversed(list(enumerate(numeros_meses))):
+                    amostras = subset_decada.loc[subset_decada["mes"] == mes_num, metrica_col].dropna().to_numpy()
+                    densidade = _kde_normalizado(
+                        amostras, grade_x, amplitude_maxima, MAX_AMOSTRAS_KDE_MENSAL, rng
+                    )
+                    if densidade is None:
+                        continue
+
+                    baseline, crista = _traco_crista(
+                        grade_x,
+                        i * espacamento_y,
+                        densidade,
+                        cores[i],
+                        nome=nomes_meses[i],
+                        hovertemplate=(
+                            f"Mês: {nomes_meses[i]}<br>"
+                            "Temperatura: %{x:.1f} °C<br>"
+                            "Densidade relativa: %{customdata:.2f}<extra></extra>"
+                        ),
+                        visivel=visivel_por_padrao,
+                    )
+                    fig.add_trace(baseline)
+                    grupos_por_trace.append(grupo)
+                    fig.add_trace(crista)
+                    grupos_por_trace.append(grupo)
+
+    metrica_padrao, regiao_padrao, _ = grupo_padrao.split("|")
+
+    fig.update_layout(
+        title=_titulo_texto_mensal(metrica_padrao, decada_padrao),
+        xaxis_title=_eixo_x_texto(metrica_padrao),
+        yaxis=dict(
+            title="Mês",
+            tickmode="array",
+            tickvals=[i * espacamento_y for i in range(12)],
+            ticktext=nomes_meses,
+        ),
+        template="plotly_white",
+        hovermode="closest",
+        height=750,
+        width=980,
+        margin=dict(t=90),
+    )
+
+    return fig, grupos_por_trace, grupo_padrao, decadas
+
+
 PAGINA_TEMPLATE = """<!doctype html>
 <html lang="pt-br">
 <head>
@@ -420,6 +543,7 @@ PAGINA_TEMPLATE = """<!doctype html>
 <style>
   body { font-family: Arial, Helvetica, sans-serif; margin: 24px; }
   h1 { font-size: 20px; }
+  h2 { font-size: 17px; margin-top: 48px; border-top: 1px solid #ddd; padding-top: 32px; }
   .controles { display: flex; gap: 28px; margin-bottom: 16px; align-items: center; }
   .controles label { font-weight: bold; margin-right: 8px; }
   .controles select { font-size: 14px; padding: 4px 10px; }
@@ -464,28 +588,98 @@ PAGINA_TEMPLATE = """<!doctype html>
     selMetrica.addEventListener("change", atualizarGrafico);
     selRegiao.addEventListener("change", atualizarGrafico);
   </script>
+
+  <h2>Variação mensal dentro de uma década</h2>
+  <div class="controles">
+    <div>
+      <label for="sel-metrica-mes">Métrica</label>
+      <select id="sel-metrica-mes">__OPCOES_METRICA_MES__</select>
+    </div>
+    <div>
+      <label for="sel-regiao-mes">Região</label>
+      <select id="sel-regiao-mes">__OPCOES_REGIAO_MES__</select>
+    </div>
+    <div>
+      <label for="sel-decada-mes">Década</label>
+      <select id="sel-decada-mes">__OPCOES_DECADA_MES__</select>
+    </div>
+  </div>
+  __DIV_PLOTLY_MES__
+  <script>
+    const gruposMes = __GRUPOS_MES_JSON__;
+    const titulosMes = __TITULOS_MES_JSON__;
+    const eixosMes = __EIXOS_JSON__;
+
+    const selMetricaMes = document.getElementById("sel-metrica-mes");
+    const selRegiaoMes = document.getElementById("sel-regiao-mes");
+    const selDecadaMes = document.getElementById("sel-decada-mes");
+    selMetricaMes.value = "__METRICA_PADRAO_MES__";
+    selRegiaoMes.value = "__REGIAO_PADRAO_MES__";
+    selDecadaMes.value = "__DECADA_PADRAO_MES__";
+
+    function atualizarGraficoMensal() {
+      const metrica = selMetricaMes.value;
+      const regiao = selRegiaoMes.value;
+      const decada = selDecadaMes.value;
+      const chave = metrica + "|" + regiao + "|" + decada;
+      const visivel = gruposMes.map(function (g) { return g === chave; });
+      const gd = document.getElementById("grafico-mes");
+      Plotly.restyle(gd, { visible: visivel });
+      Plotly.relayout(gd, {
+        "title.text": titulosMes[metrica + "|" + decada],
+        "xaxis.title.text": eixosMes[metrica],
+      });
+    }
+
+    selMetricaMes.addEventListener("change", atualizarGraficoMensal);
+    selRegiaoMes.addEventListener("change", atualizarGraficoMensal);
+    selDecadaMes.addEventListener("change", atualizarGraficoMensal);
+  </script>
 </body>
 </html>
 """
 
 
-def montar_pagina_html(fig: go.Figure, grupos_por_trace: list[str], grupo_padrao: str) -> str:
+def montar_pagina_html(
+    fig: go.Figure,
+    grupos_por_trace: list[str],
+    grupo_padrao: str,
+    fig_mes: go.Figure,
+    grupos_mes: list[str],
+    grupo_padrao_mes: str,
+    decadas: list[int],
+) -> str:
     div_html = fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="grafico")
+    div_html_mes = fig_mes.to_html(full_html=False, include_plotlyjs=False, div_id="grafico-mes")
 
     opcoes_metrica = "".join(f'<option value="{m}">{m}</option>' for m, _ in METRICAS)
     opcoes_regiao = "".join(f'<option value="{r}">{r}</option>' for r in REGIOES_ORDENADAS)
+    opcoes_decada = "".join(f'<option value="{d}">{d}s</option>' for d in decadas)
     metrica_padrao, regiao_padrao = grupo_padrao.split("|")
+    metrica_padrao_mes, regiao_padrao_mes, decada_padrao_mes = grupo_padrao_mes.split("|")
 
     titulos = {m: _titulo_texto(m) for m, _ in METRICAS}
     eixos = {m: _eixo_x_texto(m) for m, _ in METRICAS}
+    titulos_mes = {
+        f"{m}|{d}": _titulo_texto_mensal(m, d) for m, _ in METRICAS for d in decadas
+    }
 
     return (
-        PAGINA_TEMPLATE.replace("__DIV_PLOTLY__", div_html)
+        PAGINA_TEMPLATE.replace("__DIV_PLOTLY_MES__", div_html_mes)
+        .replace("__DIV_PLOTLY__", div_html)
+        .replace("__OPCOES_METRICA_MES__", opcoes_metrica)
+        .replace("__OPCOES_REGIAO_MES__", opcoes_regiao)
+        .replace("__OPCOES_DECADA_MES__", opcoes_decada)
         .replace("__OPCOES_METRICA__", opcoes_metrica)
         .replace("__OPCOES_REGIAO__", opcoes_regiao)
+        .replace("__GRUPOS_MES_JSON__", json.dumps(grupos_mes, ensure_ascii=False))
         .replace("__GRUPOS_JSON__", json.dumps(grupos_por_trace, ensure_ascii=False))
+        .replace("__TITULOS_MES_JSON__", json.dumps(titulos_mes, ensure_ascii=False))
         .replace("__TITULOS_JSON__", json.dumps(titulos, ensure_ascii=False))
         .replace("__EIXOS_JSON__", json.dumps(eixos, ensure_ascii=False))
+        .replace("__METRICA_PADRAO_MES__", metrica_padrao_mes)
+        .replace("__REGIAO_PADRAO_MES__", regiao_padrao_mes)
+        .replace("__DECADA_PADRAO_MES__", decada_padrao_mes)
         .replace("__METRICA_PADRAO__", metrica_padrao)
         .replace("__REGIAO_PADRAO__", regiao_padrao)
     )
@@ -508,7 +702,13 @@ def main() -> None:
         )
 
     fig, grupos_por_trace, grupo_padrao = montar_ridgeline_interativo(dados)
-    html = montar_pagina_html(fig, grupos_por_trace, grupo_padrao)
+
+    print("\nCalculando ridgeline mensal (metrica x regiao x decada x mes)...")
+    fig_mes, grupos_mes, grupo_padrao_mes, decadas = montar_ridgeline_mensal(dados)
+
+    html = montar_pagina_html(
+        fig, grupos_por_trace, grupo_padrao, fig_mes, grupos_mes, grupo_padrao_mes, decadas
+    )
     OUTPUT_HTML.write_text(html, encoding="utf-8")
     print(f"\nGrafico interativo salvo em: {OUTPUT_HTML}")
 
