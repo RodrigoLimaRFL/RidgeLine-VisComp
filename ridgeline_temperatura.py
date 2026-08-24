@@ -310,62 +310,60 @@ def _eixo_x_texto(metrica_label: str) -> str:
     return f"Temperatura {metrica_label.lower()} diária (°C)"
 
 
-def _gerar_paleta(n: int) -> list[str]:
-    """Gradiente do azul (decadas antigas) ao vermelho (decadas recentes)."""
-    import plotly.colors as pc
-
-    return pc.sample_colorscale("RdYlBu_r", np.linspace(0.05, 0.95, n))
-
-
-def _escurecer(cor_rgb: str, fator: float = 0.55) -> str:
-    """
-    Escurece uma cor "rgb(r, g, b)" multiplicando cada canal pelo fator.
-    Usado no contorno das cristas para garantir contraste mesmo quando o
-    preenchimento cai num tom claro do meio da paleta (ex.: RdYlBu_r).
-    """
-    numeros = cor_rgb[cor_rgb.index("(") + 1 : cor_rgb.index(")")].split(",")
-    r, g, b = (max(0, min(255, int(round(float(n) * fator)))) for n in numeros)
-    return f"rgb({r}, {g}, {b})"
+# Escala de cor usada para pintar cada crista pela propria temperatura (eixo
+# x), em vez de uma cor solida por decada/mes: azul = frio, vermelho = quente.
+ESCALA_TEMPERATURA = "RdYlBu_r"
+COR_CONTORNO = "rgba(45, 45, 45, 0.6)"
 
 
 def _traco_crista(
     grade_x: np.ndarray,
+    largura_barra: float,
     base_y: float,
     densidade: np.ndarray,
-    cor: str,
     nome: str,
     hovertemplate: str,
     visivel: bool,
-) -> tuple[go.Scatter, go.Scatter]:
+    mostrar_escala: bool,
+) -> tuple[go.Bar, go.Scatter]:
     """
-    Constroi o par de traces de uma unica crista: uma linha de base
-    invisivel (contra a qual a segunda trace preenche com fill="tonexty")
-    e a curva de densidade em si. E o bloco basico reaproveitado tanto no
-    ridgeline por decada quanto no ridgeline mensal.
+    Constroi o par de traces de uma unica crista: barras finas coloridas
+    pela propria temperatura de cada ponto (marker.color=grade_x sobre uma
+    colorscale continua, simulando um preenchimento em degrade), mais uma
+    linha de contorno por cima para separar visualmente cristas sobrepostas.
+    E o bloco basico reaproveitado tanto no ridgeline por decada quanto no
+    ridgeline mensal.
     """
-    baseline = go.Scatter(
+    barras = go.Bar(
         x=grade_x,
-        y=np.full_like(grade_x, base_y),
-        mode="lines",
-        line=dict(width=0),
-        showlegend=False,
-        hoverinfo="skip",
-        visible=visivel,
-    )
-    crista = go.Scatter(
-        x=grade_x,
-        y=base_y + densidade,
-        mode="lines",
-        line=dict(color=_escurecer(cor), width=2),
-        fill="tonexty",
-        fillcolor=cor,
+        y=densidade,
+        base=base_y,
+        width=largura_barra,
+        marker=dict(
+            color=grade_x,
+            colorscale=ESCALA_TEMPERATURA,
+            cmin=TEMP_MIN_VALIDA,
+            cmax=TEMP_MAX_VALIDA,
+            showscale=mostrar_escala,
+            colorbar=dict(title=dict(text="Temp. (°C)")) if mostrar_escala else None,
+            line=dict(width=0),
+        ),
         name=nome,
         showlegend=False,
         customdata=densidade,
         hovertemplate=hovertemplate,
         visible=visivel,
     )
-    return baseline, crista
+    contorno = go.Scatter(
+        x=grade_x,
+        y=base_y + densidade,
+        mode="lines",
+        line=dict(color=COR_CONTORNO, width=1.5),
+        showlegend=False,
+        hoverinfo="skip",
+        visible=visivel,
+    )
+    return barras, contorno
 
 
 def _kde_normalizado(
@@ -384,8 +382,8 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
     decadas = sorted(dados["decada"].unique())
     espacamento_y = 0.55
     amplitude_maxima = espacamento_y * 2.2
-    cores = _gerar_paleta(len(decadas))
     grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 180)
+    largura_barra = (TEMP_MAX_VALIDA - TEMP_MIN_VALIDA) / (len(grade_x) - 1)
     rng = np.random.default_rng(RNG_SEED)
 
     fig = go.Figure()
@@ -399,6 +397,7 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
             )
             grupo = f"{metrica_label}|{regiao_label}"
             visivel_por_padrao = grupo == grupo_padrao
+            barra_de_cor_pendente = True  # so a 1a crista visivel do grupo mostra a colorbar
 
             # Desenha da decada de cima (base_y maior) para a de baixo, para
             # que a crista de baixo seja renderizada por cima (na frente) da
@@ -410,11 +409,11 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
                 if densidade is None:
                     continue
 
-                baseline, crista = _traco_crista(
+                barras, contorno = _traco_crista(
                     grade_x,
+                    largura_barra,
                     i * espacamento_y,
                     densidade,
-                    cores[i],
                     nome=f"{decada}s",
                     hovertemplate=(
                         f"Década: {decada}s<br>"
@@ -422,10 +421,12 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
                         "Densidade relativa: %{customdata:.2f}<extra></extra>"
                     ),
                     visivel=visivel_por_padrao,
+                    mostrar_escala=barra_de_cor_pendente,
                 )
-                fig.add_trace(baseline)
+                barra_de_cor_pendente = False
+                fig.add_trace(barras)
                 grupos_por_trace.append(grupo)
-                fig.add_trace(crista)
+                fig.add_trace(contorno)
                 grupos_por_trace.append(grupo)
 
     metrica_padrao, regiao_padrao = grupo_padrao.split("|")
@@ -439,6 +440,7 @@ def montar_ridgeline_interativo(dados: pd.DataFrame) -> tuple[go.Figure, list[st
             tickvals=[i * espacamento_y for i in range(len(decadas))],
             ticktext=[f"{d}s" for d in decadas],
         ),
+        barmode="overlay",
         template="plotly_white",
         hovermode="closest",
         height=650,
@@ -467,8 +469,8 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
 
     espacamento_y = 0.55
     amplitude_maxima = espacamento_y * 2.2
-    cores = _gerar_paleta(12)
     grade_x = np.linspace(TEMP_MIN_VALIDA, TEMP_MAX_VALIDA, 180)
+    largura_barra = (TEMP_MAX_VALIDA - TEMP_MIN_VALIDA) / (len(grade_x) - 1)
     rng = np.random.default_rng(RNG_SEED)
 
     fig = go.Figure()
@@ -485,6 +487,7 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
                 subset_decada = subset_regiao[subset_regiao["decada"] == decada]
                 grupo = f"{metrica_label}|{regiao_label}|{decada}"
                 visivel_por_padrao = grupo == grupo_padrao
+                barra_de_cor_pendente = True  # so a 1a crista visivel do grupo mostra a colorbar
 
                 # mesma logica de sobreposicao do grafico por decada: mes de
                 # baixo desenhado por ultimo, para ficar na frente.
@@ -496,11 +499,11 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
                     if densidade is None:
                         continue
 
-                    baseline, crista = _traco_crista(
+                    barras, contorno = _traco_crista(
                         grade_x,
+                        largura_barra,
                         i * espacamento_y,
                         densidade,
-                        cores[i],
                         nome=nomes_meses[i],
                         hovertemplate=(
                             f"Mês: {nomes_meses[i]}<br>"
@@ -508,10 +511,12 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
                             "Densidade relativa: %{customdata:.2f}<extra></extra>"
                         ),
                         visivel=visivel_por_padrao,
+                        mostrar_escala=barra_de_cor_pendente,
                     )
-                    fig.add_trace(baseline)
+                    barra_de_cor_pendente = False
+                    fig.add_trace(barras)
                     grupos_por_trace.append(grupo)
-                    fig.add_trace(crista)
+                    fig.add_trace(contorno)
                     grupos_por_trace.append(grupo)
 
     metrica_padrao, regiao_padrao, _ = grupo_padrao.split("|")
@@ -525,6 +530,7 @@ def montar_ridgeline_mensal(dados: pd.DataFrame) -> tuple[go.Figure, list[str], 
             tickvals=[i * espacamento_y for i in range(12)],
             ticktext=nomes_meses,
         ),
+        barmode="overlay",
         template="plotly_white",
         hovermode="closest",
         height=750,
