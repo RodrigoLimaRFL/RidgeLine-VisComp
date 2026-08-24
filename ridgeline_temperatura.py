@@ -29,7 +29,6 @@ Como configurar o Kaggle antes de rodar:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -119,54 +118,68 @@ def detectar_colunas(df: pd.DataFrame) -> dict:
 # 3. CARGA E LIMPEZA
 # --------------------------------------------------------------------------- #
 
-def ler_um_arquivo(caminho_csv: Path) -> pd.DataFrame | None:
-    """Le um CSV de estacao, tentando encodings/separadores comuns do BDMEP."""
+def detectar_separador_e_encoding(caminho_csv: Path) -> tuple[str, str] | None:
+    """
+    Descobre encoding/separador lendo so o cabecalho (nrows=0), o que e
+    barato mesmo em arquivos gigantes como o deste dataset (~780 MB).
+    """
     for encoding in ("utf-8", "latin1"):
-        for sep in (",", ";"):
+        for sep in (";", ","):
             try:
-                df = pd.read_csv(
-                    caminho_csv, encoding=encoding, sep=sep, low_memory=False
-                )
+                cabecalho = pd.read_csv(caminho_csv, encoding=encoding, sep=sep, nrows=0)
             except (UnicodeDecodeError, pd.errors.ParserError):
                 continue
-            if df.shape[1] >= 2:
-                return df
+            if cabecalho.shape[1] >= 2:
+                return encoding, sep
     return None
 
 
 def carregar_dados_brutos(pasta_dataset: Path) -> pd.DataFrame:
+    """
+    O dataset nao vem "um CSV por estacao": vem como uma unica tabela grande
+    com todas as estacoes (conventional_weather_stations_inmet_brazil_*.csv)
+    mais um ou dois arquivos auxiliares de metadados (codigos de estacao,
+    codigos de direcao do vento) que nao tem colunas de data/temperatura.
+    Por isso cada CSV encontrado e inspecionado e os que nao parecem ser
+    tabelas de medicoes sao pulados, em vez de travar o script.
+    """
     arquivos_csv = sorted(pasta_dataset.rglob("*.csv"))
     if not arquivos_csv:
         raise FileNotFoundError(
             f"Nenhum CSV encontrado em {pasta_dataset}. Verifique o download."
         )
 
-    print(f"Encontrados {len(arquivos_csv)} arquivos de estacao. Lendo...")
+    print(f"Encontrados {len(arquivos_csv)} arquivo(s) CSV. Inspecionando...")
 
     partes = []
-    colunas_referencia = None
 
-    for i, caminho in enumerate(arquivos_csv, start=1):
-        df = ler_um_arquivo(caminho)
-        if df is None or df.empty:
+    for caminho in arquivos_csv:
+        config = detectar_separador_e_encoding(caminho)
+        if config is None:
+            print(f"  [pulado] {caminho.name}: nao foi possivel ler o arquivo.")
+            continue
+        encoding, sep = config
+
+        cabecalho = pd.read_csv(caminho, encoding=encoding, sep=sep, nrows=0)
+        colunas = detectar_colunas(cabecalho)
+
+        if colunas["data"] is None or (colunas["tmed"] is None and colunas["tmax"] is None):
+            print(
+                f"  [pulado] {caminho.name}: sem colunas de data/temperatura "
+                "reconheciveis (provavelmente um arquivo auxiliar de metadados)."
+            )
             continue
 
-        colunas = detectar_colunas(df)
-        if colunas_referencia is None:
-            colunas_referencia = colunas
-            print("Colunas detectadas no primeiro arquivo:")
-            for chave, valor in colunas.items():
-                print(f"  {chave:8s} -> {valor}")
-            if colunas["data"] is None or (
-                colunas["tmax"] is None and colunas["tmed"] is None
-            ):
-                print(
-                    "\nAVISO: nao foi possivel detectar automaticamente as "
-                    "colunas de data/temperatura. Confira df.columns abaixo "
-                    "e ajuste `detectar_colunas` manualmente.\n",
-                    list(df.columns),
-                )
-                sys.exit(1)
+        colunas_uteis = {
+            colunas[chave]
+            for chave in ("data", "tmed", "tmax", "tmin", "estacao")
+            if colunas[chave]
+        }
+        print(f"  [OK] {caminho.name} -> lendo colunas: {sorted(colunas_uteis)}")
+
+        df = pd.read_csv(
+            caminho, encoding=encoding, sep=sep, usecols=sorted(colunas_uteis), low_memory=False
+        )
 
         registro = pd.DataFrame()
         registro["data"] = pd.to_datetime(df[colunas["data"]], errors="coerce", dayfirst=True)
@@ -178,18 +191,26 @@ def carregar_dados_brutos(pasta_dataset: Path) -> pd.DataFrame:
             tmin = (
                 pd.to_numeric(df[colunas["tmin"]], errors="coerce")
                 if colunas["tmin"]
-                else np.nan
+                else None
             )
-            registro["temp"] = np.where(tmin.notna(), (tmax + tmin) / 2, tmax) if colunas["tmin"] else tmax
+            registro["temp"] = (
+                np.where(tmin.notna(), (tmax + tmin) / 2, tmax) if tmin is not None else tmax
+            )
 
         registro["estacao"] = (
-            df[colunas["estacao"]].astype(str) if colunas["estacao"] else caminho.stem
+            df[colunas["estacao"]].astype("category")
+            if colunas["estacao"]
+            else caminho.stem
         )
 
+        print(f"           {len(registro):,} linhas lidas")
         partes.append(registro)
 
-        if i % 50 == 0 or i == len(arquivos_csv):
-            print(f"  ... {i}/{len(arquivos_csv)} arquivos processados")
+    if not partes:
+        raise RuntimeError(
+            "Nenhum arquivo com colunas de data/temperatura reconheciveis foi "
+            "encontrado no dataset baixado."
+        )
 
     dados = pd.concat(partes, ignore_index=True)
     return dados
