@@ -1,6 +1,5 @@
 # Ridgeline: Temperatura no Brasil
-
-Seminário 01 (SCC0252) — visualização em ridgeline plot da temperatura no Brasil por década, região e mês, com [Plotly](https://plotly.com/python/).
+Visualização em ridgeline plot da temperatura no Brasil por década, região e mês, com [Plotly](https://plotly.com/python/).
 
 ## Dataset
 
